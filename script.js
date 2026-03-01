@@ -47,9 +47,9 @@ const FLOW_OCTAVES   = [
   [2.9, 2.3, 0.00041, 0.00033],   // mid-scale faster eddy
   [1.2, 2.8, 0.00017, 0.00047],   // wide, slowest drift
 ];
-let flowT = 0;   // frame counter — drives temporal evolution of the flow field
-const TRAIL_LEN      = 55;   // past positions kept per wetland
-let   trailsOn       = false; // press T to toggle
+let flowT       = 0;   // frame counter — drives temporal evolution of the flow field
+let flowOffsetX = 0;   // advection offset X (normalised units) — drifts flow lookup position
+let flowOffsetY = 0;   // advection offset Y (normalised units)
 let   flowVizOn      = false; // click inside enclosure to toggle
 const SPEED_STEPS    = [1, 1.5, 2, 3];   // available speed multipliers
 let   speedIdx       = 0;    // index into SPEED_STEPS
@@ -73,7 +73,6 @@ class Wetland {
     this.mass   = DENSITY * Math.PI * radius * radius;
     this.wxf    = 0;   // smoothed wave-noise force X  (EMA state)
     this.wyf    = 0;   // smoothed wave-noise force Y  (EMA state)
-    this.trail  = [];  // past {x,y} positions for motion trail
   }
 
   // ── Step 1 ── clear acceleration + force accumulator
@@ -153,30 +152,12 @@ class Wetland {
   draw() {
     const { x, y, radius: r } = this;
 
-    // ── motion trail ────────────────────────────────────────────────────────
-    // Record position every frame (always, so toggling on is instant).
-    this.trail.push({ x, y });
-    if (this.trail.length > TRAIL_LEN) this.trail.shift();
-
-    if (trailsOn && this.trail.length >= 2) {
-      const n = this.trail.length;
-      for (let i = 0; i < n; i++) {
-        const age   = i / (n - 1);           // 0 = oldest … 1 = newest
-        const alpha = age * 0.30;
-        const tr    = r * (0.08 + age * 0.18);
-        ctx.beginPath();
-        ctx.arc(this.trail[i].x, this.trail[i].y, tr, 0, Math.PI * 2);
-        ctx.fillStyle = `rgba(30,35,40,${alpha.toFixed(2)})`;
-        ctx.fill();
-      }
-    }
-
     // single circle — transparent fill, thin dark stroke
     ctx.beginPath();
     ctx.arc(x, y, r, 0, Math.PI * 2);
     ctx.fillStyle   = 'transparent';
     ctx.fill();
-    ctx.strokeStyle = 'rgba(0,0,0, 0.70)';
+    ctx.strokeStyle = 'hsla(0, 0%, 0%, 0.90)';
     ctx.lineWidth   = 1;
     ctx.stroke();
 
@@ -198,7 +179,7 @@ class Wetland {
     const tx = x + ux * len;   // tip
     const ty = y + uy * len;
 
-    ctx.strokeStyle = 'rgba(30,35,40, 0.90)';
+    ctx.strokeStyle = 'hsla(0, 0%, 0%, 0.75)';
     ctx.lineWidth   = 1.5;
     ctx.lineCap     = 'round';
 
@@ -325,8 +306,8 @@ function applyWaveNoise(w) {
 //   Force is NOT mass-scaled → lighter objects drift more (buoyant feel).
 //
 function applyCurrentFlow(w, bnd) {
-  const nx = (w.x - bnd.cx) / bnd.r;   // normalised position [-1, 1]
-  const ny = (w.y - bnd.cy) / bnd.r;
+  const nx = (w.x - bnd.cx) / bnd.r + flowOffsetX;   // normalised + advection offset
+  const ny = (w.y - bnd.cy) / bnd.r + flowOffsetY;
 
   let fx = 0, fy = 0;
 
@@ -343,15 +324,21 @@ function applyCurrentFlow(w, bnd) {
 
 // ── Background + enclosure rendering ─────────────────────────────────────────
 function drawScene(b) {
-  // white background
+  // new background
   ctx.fillStyle = '#ffffff';
   ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  // dotted boundary infill (white)
+  ctx.beginPath();
+  ctx.arc(b.cx, b.cy, b.r, 0, Math.PI * 2);
+  ctx.fillStyle = '#ffffff';
+  ctx.fill();
 
   // dotted boundary ring
   ctx.beginPath();
   ctx.arc(b.cx, b.cy, b.r, 0, Math.PI * 2);
   ctx.setLineDash([6, 9]);
-  ctx.strokeStyle = 'rgba(0,0,0, 0.45)';
+  ctx.strokeStyle = 'hsla(0, 0%, 0%, 0.90)';
   ctx.lineWidth   = 1.75;
   ctx.stroke();
   ctx.setLineDash([]);   // restore solid for everything else
@@ -360,7 +347,7 @@ function drawScene(b) {
   ctx.font         = '18px helvetica, arial, sans-serif';
   ctx.textAlign    = 'center';
   ctx.textBaseline = 'top';
-  ctx.fillStyle    = 'rgba(0,0,0, 0.55)';
+  ctx.fillStyle    = 'hsla(0, 0%, 0%, 0.90)';
   ctx.fillText(`${SPEED_STEPS[speedIdx]}x`, b.cx, b.cy + b.r + 18);
   ctx.textBaseline = 'alphabetic';   // restore default
 }
@@ -372,12 +359,12 @@ function drawScene(b) {
 function drawFlowViz(b) {
   if (!flowVizOn) return;
 
-  const SPACING = 44;   // px between sample points
-  const SEG     = 14;   // half-length of each segment (total = 2 × SEG)
+  const SPACING = 44;   // px 44 between sample points
+  const SEG     = 11;   // 14 half-length of each segment (total = 2 × SEG)
 
   ctx.lineWidth   = 0.9;
   ctx.lineCap     = 'round';
-  ctx.strokeStyle = 'rgba(0,0,0, 0.13)';
+  ctx.strokeStyle = 'rgba(126, 126, 126, 0.5)';
 
   const n = FLOW_OCTAVES.length;
 
@@ -385,9 +372,9 @@ function drawFlowViz(b) {
     for (let gy = b.cy - b.r; gy <= b.cy + b.r; gy += SPACING) {
       if (Math.hypot(gx - b.cx, gy - b.cy) > b.r - 6) continue;
 
-      // same curl formula as applyCurrentFlow — normalised position
-      const nx = (gx - b.cx) / b.r;
-      const ny = (gy - b.cy) / b.r;
+      // same curl formula as applyCurrentFlow — normalised + advection offset
+      const nx = (gx - b.cx) / b.r + flowOffsetX;
+      const ny = (gy - b.cy) / b.r + flowOffsetY;
       let fx = 0, fy = 0;
       for (const [kx, ky, ox, oy] of FLOW_OCTAVES) {
         const phiX = kx * nx + ox * flowT;
@@ -436,11 +423,6 @@ function spawnWetlands() {
   return list;
 }
 
-// ── Trail toggle ──────────────────────────────────────────────────────────────
-window.addEventListener('keydown', e => {
-  if (e.key === 't' || e.key === 'T') trailsOn = !trailsOn;
-});
-
 // ── Speed label click + hover cursor ─────────────────────────────────────────
 function speedLabelHit(ex, ey) {
   const b  = getBoundary();
@@ -479,6 +461,17 @@ function loop() {
 
   for (let s = 0; s < steps; s++) {
     flowT++;   // advance flow field time — once per physics step
+
+    // ── Flow field advection ───────────────────────────────────────────────
+    // Shift the spatial lookup origin by a slow sinusoidal velocity.
+    // Two incommensurate frequencies per axis → non-repeating, non-constant.
+    // Integral of sin is bounded (-cos), so the offset never accumulates
+    // indefinitely — vortices wander but do not drift off to one side forever.
+    // Max offset ≈ ±0.37 normalised units; period ≈ 3–5 min at 60 fps.
+    flowOffsetX += 0.000095 * Math.sin(0.000523 * flowT)
+                 + 0.000065 * Math.sin(0.000349 * flowT);
+    flowOffsetY += 0.000095 * Math.sin(0.000419 * flowT + 1.91)
+                 + 0.000065 * Math.sin(0.000277 * flowT + 0.85);
 
     for (const w of wetlands) {
       w.resetAcceleration();   // 1
