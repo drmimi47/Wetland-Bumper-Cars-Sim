@@ -51,7 +51,11 @@ let flowT       = 0;   // frame counter — drives temporal evolution of the flo
 let flowOffsetX = 0;   // advection offset X (normalised units) — drifts flow lookup position
 let flowOffsetY = 0;   // advection offset Y (normalised units)
 let   flowVizOn      = false; // click inside enclosure to toggle
-const SPEED_STEPS    = [1, 1.5, 2, 3];   // available speed multipliers
+let   trailOn        = false; // click outside enclosure to toggle motion trails
+const trailClones    = [];    // stored frame snapshots [{x,y,radius}, ...][] — grows until cleared
+const TRAIL_SAMPLE   = 2;     // capture a snapshot every N render frames
+let   trailTick      = 0;     // render-frame counter for sampling
+const SPEED_STEPS    = [1, 1.5, 2, 3, 5];   // available speed multipliers
 let   speedIdx       = 0;    // index into SPEED_STEPS
 let   simAccum       = 0;    // fractional step accumulator for sub-integer speeds
 const COUNT          = 10;   // number of wetlands to simulate
@@ -152,7 +156,9 @@ class Wetland {
   draw() {
     const { x, y, radius: r } = this;
 
-    // single circle — transparent fill, thin dark stroke
+    // single circle — transparent fill, thin dark stroke + shadow glow
+    ctx.shadowColor  = 'rgba(0, 0, 0, 0.52)';
+    ctx.shadowBlur   = 11.5;
     ctx.beginPath();
     ctx.arc(x, y, r, 0, Math.PI * 2);
     ctx.fillStyle   = 'transparent';
@@ -160,6 +166,8 @@ class Wetland {
     ctx.strokeStyle = 'hsla(0, 0%, 0%, 0.90)';
     ctx.lineWidth   = 1;
     ctx.stroke();
+    ctx.shadowColor = 'transparent';
+    ctx.shadowBlur  = 0;
 
     // ── velocity arrow ─────────────────────────────────────────────────────
     // Skip only when velocity is numerically zero — avoids division-by-zero.
@@ -173,14 +181,14 @@ class Wetland {
 
     // Length: base (always visible) + speed-scaled portion.
     // Cap at 92% r so the tip sits just inside the outer ring at max speed.
-    const len     = Math.min(r * 0.15 + speed * r * 1.5, r * 0.92);
-    const headLen = Math.max(4, len * 0.25);   // arrowhead proportional to shaft
+    const len     = Math.min(r * 0.30 + speed * r * 2.2, r * 0.92);
+    const headLen = Math.max(7, len * 0.35);   // arrowhead proportional to shaft
 
     const tx = x + ux * len;   // tip
     const ty = y + uy * len;
 
     ctx.strokeStyle = 'hsla(0, 0%, 0%, 0.75)';
-    ctx.lineWidth   = 1.5;
+    ctx.lineWidth   = 2.5;
     ctx.lineCap     = 'round';
 
     // shaft
@@ -276,8 +284,9 @@ function applyDrift(w) {
 
 // ── Environmental force 2: subtle wave noise ───────────────────────────────────
 // Each wetland owns a smoothed force vector (wxf, wyf) that drifts toward a new
-// random target every frame using an EMA.  The force is NOT mass-scaled, so
-// smaller (lighter) wetlands respond more — they bob; large ones barely shift.
+// random target every frame using an EMA.  Force is mass-scaled so acceleration
+// is uniform across sizes — drag (DRAG_SMALL vs DRAG_LARGE) is what makes
+// larger circles slower, not a near-zero force.
 //
 //   new_wxf = wxf + (random_target − wxf) × WAVE_LERP
 //
@@ -286,7 +295,7 @@ function applyDrift(w) {
 function applyWaveNoise(w) {
   w.wxf += ((Math.random() - 0.5) * WAVE_STR - w.wxf) * WAVE_LERP;
   w.wyf += ((Math.random() - 0.5) * WAVE_STR - w.wyf) * WAVE_LERP;
-  w.addForce(w.wxf, w.wyf);
+  w.addForce(w.wxf * w.mass, w.wyf * w.mass);
 }
 
 // ── Environmental force 3: spatiotemporal current flow field ──────────────────
@@ -303,7 +312,8 @@ function applyWaveNoise(w) {
 //   pattern is independent of window size and fills the whole enclosure.
 //   Nearby wetlands share similar forces; distant ones experience independent flow.
 //
-//   Force is NOT mass-scaled → lighter objects drift more (buoyant feel).
+//   Force is mass-scaled → uniform acceleration across sizes; drag difference
+//   (DRAG_SMALL vs DRAG_LARGE) is what makes larger circles cruise slower.
 //
 function applyCurrentFlow(w, bnd) {
   const nx = (w.x - bnd.cx) / bnd.r + flowOffsetX;   // normalised + advection offset
@@ -319,7 +329,7 @@ function applyCurrentFlow(w, bnd) {
   }
 
   const n = FLOW_OCTAVES.length;
-  w.addForce((fx / n) * FLOW_STR, (fy / n) * FLOW_STR);
+  w.addForce((fx / n) * FLOW_STR * w.mass, (fy / n) * FLOW_STR * w.mass);
 }
 
 // ── Background + enclosure rendering ─────────────────────────────────────────
@@ -335,13 +345,17 @@ function drawScene(b) {
   ctx.fill();
 
   // dotted boundary ring
+  ctx.shadowColor  = 'rgba(0, 0, 0, 0.45)';
+  ctx.shadowBlur   = 10;
   ctx.beginPath();
   ctx.arc(b.cx, b.cy, b.r, 0, Math.PI * 2);
-  ctx.setLineDash([6, 9]);
+  ctx.setLineDash([16, 9]);  // 6px dash, 9px gap
   ctx.strokeStyle = 'hsla(0, 0%, 0%, 0.90)';
-  ctx.lineWidth   = 1.75;
+  ctx.lineWidth   = 1.5;
   ctx.stroke();
   ctx.setLineDash([]);   // restore solid for everything else
+  ctx.shadowColor = 'transparent';
+  ctx.shadowBlur  = 0;
 
   // speed label — bottom center of boundary ring, clickable
   ctx.font         = '18px helvetica, arial, sans-serif';
@@ -438,11 +452,42 @@ canvas.addEventListener('click', e => {
   const b = getBoundary();
   if (Math.hypot(e.clientX - b.cx, e.clientY - b.cy) <= b.r) {
     flowVizOn = !flowVizOn;
+  } else {
+    trailOn = !trailOn;
+    if (!trailOn) trailClones.length = 0;   // clear all ghosts on toggle-off
   }
 });
 canvas.addEventListener('mousemove', e => {
   canvas.style.cursor = speedLabelHit(e.clientX, e.clientY) ? 'pointer' : 'default';
 });
+
+// ── Spacebar: toggle GIF overlay ─────────────────────────────────────────────
+const gifOverlay = document.getElementById('gif-overlay');
+document.addEventListener('keydown', e => {
+  if (e.code === 'Space') {
+    e.preventDefault();
+    gifOverlay.classList.toggle('active');
+  }
+});
+
+// ── Motion trail clones ───────────────────────────────────────────────────────
+// Renders stored snapshots oldest→newest with opacity and stroke weight
+// scaling linearly from near-invisible (oldest) to near-solid (newest).
+function drawTrailClones() {
+  if (trailClones.length === 0) return;
+
+  ctx.save();
+  ctx.strokeStyle = 'rgba(0, 0, 0, 0.13)';
+  ctx.lineWidth   = 0.75;
+  for (const frame of trailClones) {
+    for (const { x, y, radius } of frame) {
+      ctx.beginPath();
+      ctx.arc(x, y, radius, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+  }
+  ctx.restore();
+}
 
 // ── Main loop ─────────────────────────────────────────────────────────────────
 const wetlands = spawnWetlands();
@@ -451,7 +496,6 @@ function loop() {
   const b = getBoundary();
 
   drawScene(b);      // background + enclosure visual
-  drawFlowViz(b);    // optional flow field overlay (click inside enclosure)
 
   // Run physics N times this frame to achieve the chosen speed multiplier.
   // simAccum carries fractional remainder so 1.5x alternates 1/2 steps cleanly.
@@ -486,8 +530,21 @@ function loop() {
     resolveCircleCollisions(wetlands);  // 9  object–object collision
   }
 
+  // ── Trail snapshot capture ─────────────────────────────────────────────────
+  // Sample every TRAIL_SAMPLE render frames when trail mode is active.
+  // Clones are plain data objects — no physics, just frozen position + radius.
+  if (trailOn) {
+    trailTick++;
+    if (trailTick % TRAIL_SAMPLE === 0) {
+      trailClones.push(wetlands.map(w => ({ x: w.x, y: w.y, radius: w.radius })));
+    }
+  }
+
+  drawTrailClones();           // render stored clones
+  drawFlowViz(b);              // flow field overlay on top of clones (click inside enclosure)
+
   for (const w of wetlands) {
-    w.draw();                // 10 render
+    w.draw();                  // 10 render (active circles on top)
   }
 
   requestAnimationFrame(loop);
