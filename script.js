@@ -9,10 +9,17 @@
 const canvas = document.getElementById('sim');
 const ctx    = canvas.getContext('2d');
 
+// ── Offscreen trail canvas — snapshots are composited here; never re-iterated ─
+const trailCanvas = document.createElement('canvas');
+const trailCtx    = trailCanvas.getContext('2d');
+
 // ── Resize ────────────────────────────────────────────────────────────────────
 function resize() {
   canvas.width  = window.innerWidth;
   canvas.height = window.innerHeight;
+  // trail canvas must match — clearing it on resize is acceptable
+  trailCanvas.width  = canvas.width;
+  trailCanvas.height = canvas.height;
 }
 window.addEventListener('resize', resize);
 resize();
@@ -52,7 +59,6 @@ let flowOffsetX = 0;   // advection offset X (normalised units) — drifts flow 
 let flowOffsetY = 0;   // advection offset Y (normalised units)
 let   flowVizOn      = false; // click inside enclosure to toggle
 let   trailOn        = false; // click outside enclosure to toggle motion trails
-const trailClones    = [];    // stored frame snapshots [{x,y,radius}, ...][] — grows until cleared
 const TRAIL_SAMPLE   = 2;     // capture a snapshot every N render frames
 let   trailTick      = 0;     // render-frame counter for sampling
 const SPEED_STEPS    = [1, 1.5, 2, 3, 5];   // available speed multipliers
@@ -373,12 +379,12 @@ function drawScene(b) {
 function drawFlowViz(b) {
   if (!flowVizOn) return;
 
-  const SPACING = 44;   // px 44 between sample points
-  const SEG     = 11;   // 14 half-length of each segment (total = 2 × SEG)
+  const SPACING = 44;   // px between sample points
+  const SEG     = 11;   // half-length of each segment (total = 2 × SEG)
+  const t       = flowT * 0.012;   // slow visual time — drives wobble animation
 
-  ctx.lineWidth   = 0.9;
-  ctx.lineCap     = 'round';
-  ctx.strokeStyle = 'rgba(126, 126, 126, 0.5)';
+  ctx.lineWidth = 0.9;
+  ctx.lineCap   = 'round';
 
   const n = FLOW_OCTAVES.length;
 
@@ -404,9 +410,25 @@ function drawFlowViz(b) {
       const ux = fx / mag;
       const uy = fy / mag;
 
+      // perpendicular direction (90° CCW from flow)
+      const px = -uy;
+      const py =  ux;
+
+      // per-point spatial phase — neighboring segments ripple out of sync
+      const phase  = gx * 0.13 + gy * 0.17;
+      const wobble = Math.sin(t + phase) * SEG * 0.55;
+
+      // quadratic bezier: control point displaced perpendicular to flow
+      const cpx = gx + px * wobble;
+      const cpy = gy + py * wobble;
+
+      // shimmer opacity with a second slower sinusoid per point
+      const alpha = 0.32 + 0.18 * Math.abs(Math.sin(t * 0.6 + phase));
+      ctx.strokeStyle = `rgba(126, 126, 126, ${alpha.toFixed(2)})`;
+
       ctx.beginPath();
       ctx.moveTo(gx - ux * SEG, gy - uy * SEG);
-      ctx.lineTo(gx + ux * SEG, gy + uy * SEG);
+      ctx.quadraticCurveTo(cpx, cpy, gx + ux * SEG, gy + uy * SEG);
       ctx.stroke();
     }
   }
@@ -440,8 +462,8 @@ function spawnWetlands() {
 // ── Speed label click + hover cursor ─────────────────────────────────────────
 function speedLabelHit(ex, ey) {
   const b  = getBoundary();
-  const ly = b.cy + b.r + 10;
-  return Math.abs(ex - b.cx) < 28 && ey >= ly && ey <= ly + 16;
+  const ly = b.cy + b.r + 2;
+  return Math.abs(ex - b.cx) < 48 && ey >= ly && ey <= ly + 32;
 }
 canvas.addEventListener('click', e => {
   if (speedLabelHit(e.clientX, e.clientY)) {
@@ -454,7 +476,7 @@ canvas.addEventListener('click', e => {
     flowVizOn = !flowVizOn;
   } else {
     trailOn = !trailOn;
-    if (!trailOn) trailClones.length = 0;   // clear all ghosts on toggle-off
+    if (!trailOn) trailCtx.clearRect(0, 0, trailCanvas.width, trailCanvas.height);
   }
 });
 canvas.addEventListener('mousemove', e => {
@@ -471,22 +493,10 @@ document.addEventListener('keydown', e => {
 });
 
 // ── Motion trail clones ───────────────────────────────────────────────────────
-// Renders stored snapshots oldest→newest with opacity and stroke weight
-// scaling linearly from near-invisible (oldest) to near-solid (newest).
+// Each snapshot is painted directly onto trailCanvas as it is captured.
+// Rendering costs one drawImage call per frame — independent of trail length.
 function drawTrailClones() {
-  if (trailClones.length === 0) return;
-
-  ctx.save();
-  ctx.strokeStyle = 'rgba(0, 0, 0, 0.13)';
-  ctx.lineWidth   = 0.75;
-  for (const frame of trailClones) {
-    for (const { x, y, radius } of frame) {
-      ctx.beginPath();
-      ctx.arc(x, y, radius, 0, Math.PI * 2);
-      ctx.stroke();
-    }
-  }
-  ctx.restore();
+  ctx.drawImage(trailCanvas, 0, 0);
 }
 
 // ── Main loop ─────────────────────────────────────────────────────────────────
@@ -536,7 +546,13 @@ function loop() {
   if (trailOn) {
     trailTick++;
     if (trailTick % TRAIL_SAMPLE === 0) {
-      trailClones.push(wetlands.map(w => ({ x: w.x, y: w.y, radius: w.radius })));
+      trailCtx.strokeStyle = 'rgba(0, 0, 0, 0.13)';
+      trailCtx.lineWidth   = 0.75;
+      for (const w of wetlands) {
+        trailCtx.beginPath();
+        trailCtx.arc(w.x, w.y, w.radius, 0, Math.PI * 2);
+        trailCtx.stroke();
+      }
     }
   }
 
