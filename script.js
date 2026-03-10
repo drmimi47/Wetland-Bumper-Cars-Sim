@@ -15,9 +15,12 @@ const trailCtx    = trailCanvas.getContext('2d');
 
 // ── Resize ────────────────────────────────────────────────────────────────────
 function resize() {
-  canvas.width  = window.innerWidth;
-  canvas.height = window.innerHeight;
-  // trail canvas must match — clearing it on resize is acceptable
+  // 2× pixel buffer, CSS-sized to viewport — visually identical to 50% browser zoom
+  canvas.width  = window.innerWidth  * 2;
+  canvas.height = window.innerHeight * 2;
+  canvas.style.width  = window.innerWidth  + 'px';
+  canvas.style.height = window.innerHeight + 'px';
+  // trail canvas must match pixel buffer — clearing it on resize is acceptable
   trailCanvas.width  = canvas.width;
   trailCanvas.height = canvas.height;
 }
@@ -29,7 +32,7 @@ function getBoundary() {
   return {
     cx: canvas.width  / 2,
     cy: canvas.height / 2,
-    r:  Math.min(canvas.width, canvas.height) * 0.44,
+    r:  Math.min(canvas.width, canvas.height) * 0.47,
   };
 }
 
@@ -466,13 +469,15 @@ function speedLabelHit(ex, ey) {
   return Math.abs(ex - b.cx) < 48 && ey >= ly && ey <= ly + 32;
 }
 canvas.addEventListener('click', e => {
-  if (speedLabelHit(e.clientX, e.clientY)) {
+  // client coords are CSS px; canvas coords are 2× that
+  const mx = e.clientX * 2, my = e.clientY * 2;
+  if (speedLabelHit(mx, my)) {
     speedIdx = (speedIdx + 1) % SPEED_STEPS.length;
     simAccum = 0;
     return;
   }
   const b = getBoundary();
-  if (Math.hypot(e.clientX - b.cx, e.clientY - b.cy) <= b.r) {
+  if (Math.hypot(mx - b.cx, my - b.cy) <= b.r) {
     flowVizOn = !flowVizOn;
   } else {
     trailOn = !trailOn;
@@ -480,7 +485,7 @@ canvas.addEventListener('click', e => {
   }
 });
 canvas.addEventListener('mousemove', e => {
-  canvas.style.cursor = speedLabelHit(e.clientX, e.clientY) ? 'pointer' : 'default';
+  canvas.style.cursor = speedLabelHit(e.clientX * 2, e.clientY * 2) ? 'pointer' : 'default';
 });
 
 // ── Spacebar: toggle GIF overlay ─────────────────────────────────────────────
