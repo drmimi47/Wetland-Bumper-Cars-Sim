@@ -62,6 +62,7 @@ let flowOffsetX = 0;   // advection offset X (normalised units) — drifts flow 
 let flowOffsetY = 0;   // advection offset Y (normalised units)
 let   flowVizOn      = false; // click inside enclosure to toggle
 let   trailOn        = false; // click outside enclosure to toggle motion trails
+let   dashOffset     = 0;    // animated offset for rotating boundary dashes
 const TRAIL_SAMPLE   = 2;     // capture a snapshot every N render frames
 let   trailTick      = 0;     // render-frame counter for sampling
 const SPEED_STEPS    = [1, 1.5, 2, 3, 5];   // available speed multipliers
@@ -343,6 +344,7 @@ function applyCurrentFlow(w, bnd) {
 
 // ── Background + enclosure rendering ─────────────────────────────────────────
 function drawScene(b) {
+  dashOffset -= 0.15;   // advance clockwise each render frame
   // new background
   ctx.fillStyle = '#ffffff';
   ctx.fillRect(0, 0, canvas.width, canvas.height);
@@ -358,11 +360,13 @@ function drawScene(b) {
   ctx.shadowBlur   = 10;
   ctx.beginPath();
   ctx.arc(b.cx, b.cy, b.r, 0, Math.PI * 2);
-  ctx.setLineDash([16, 9]);  // 6px dash, 9px gap
+  ctx.setLineDash([16, 9]);
+  ctx.lineDashOffset = dashOffset;
   ctx.strokeStyle = 'hsla(0, 0%, 0%, 0.90)';
   ctx.lineWidth   = 1.5;
   ctx.stroke();
-  ctx.setLineDash([]);   // restore solid for everything else
+  ctx.setLineDash([]);
+  ctx.lineDashOffset = 0;   // restore for everything else
   ctx.shadowColor = 'transparent';
   ctx.shadowBlur  = 0;
 
