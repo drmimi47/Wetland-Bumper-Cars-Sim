@@ -60,13 +60,14 @@ const FLOW_OCTAVES   = [
 let flowT       = 0;   // frame counter — drives temporal evolution of the flow field
 let flowOffsetX = 0;   // advection offset X (normalised units) — drifts flow lookup position
 let flowOffsetY = 0;   // advection offset Y (normalised units)
-let   flowVizOn      = false; // click inside enclosure to toggle
-let   trailOn        = false; // click outside enclosure to toggle motion trails
+let   flowVizOn      = true;  // always on
+let   trailOn        = true;  // click outside enclosure to toggle motion trails
+let   gravWell       = null;  // { x, y, strength } — set on click inside boundary
 let   dashOffset     = 0;    // animated offset for rotating boundary dashes
 const TRAIL_SAMPLE   = 2;     // capture a snapshot every N render frames
 let   trailTick      = 0;     // render-frame counter for sampling
 const SPEED_STEPS    = [1, 1.5, 2, 3, 5];   // available speed multipliers
-let   speedIdx       = 0;    // index into SPEED_STEPS
+let   speedIdx       = 4;    // index into SPEED_STEPS (default: 5x)
 let   simAccum       = 0;    // fractional step accumulator for sub-integer speeds
 const COUNT          = 10;   // number of wetlands to simulate
 const MIN_R          = 25;
@@ -443,6 +444,57 @@ function drawFlowViz(b) {
   ctx.lineCap = 'butt';   // restore default
 }
 
+// ── Gravitational well ────────────────────────────────────────────────────────
+// Pulls each wetland toward the clicked point with a 1/d² inverse-square law,
+// clamped so the force doesn't blow up at very close range.
+function applyGravWell(w) {
+  if (!gravWell) return;
+  const dx   = gravWell.x - w.x;
+  const dy   = gravWell.y - w.y;
+  const dist = Math.hypot(dx, dy);
+  if (dist < 1e-6 || dist > gravWell.radius) return;  // outside influence zone
+  const u       = 1 - dist / gravWell.radius;
+  const falloff = 0.5 + 0.25 * u * u;  // quadratic: 75% at center → 50% at edge, smooth curve
+  const d     = Math.max(dist, 40);                    // clamp: min effective dist = 40px
+  const force = gravWell.strength * w.mass / d * falloff;  // 1/d — stays meaningful at large radii
+  w._fx += (dx / dist) * force;
+  w._fy += (dy / dist) * force;
+}
+
+// Draws concentric ripple rings expanding outward from the well — like a water drop disturbance.
+// Each ring travels from center to gravWell.radius over RIPPLE_PERIOD frames, fading as it expands.
+const RIPPLE_COUNT  = 4;    // simultaneous rings
+const RIPPLE_PERIOD = 90;   // frames for one ring to cross the full radius
+function drawGravWell() {
+  if (!gravWell) return;
+  const t      = (Math.abs(gravWell.strength) - 0.08) / 0.52;  // 0 = subtle, 1 = strong
+  const maxR   = gravWell.radius;
+  const baseA  = 0.30 + t * 0.50;                   // peak alpha scales with strength
+  const lw     = 1.2 + t * 1.8;
+
+  ctx.save();
+  ctx.shadowColor = 'rgba(10, 30, 120, 0.5)';
+  ctx.shadowBlur  = 6;
+  ctx.lineWidth   = lw;
+
+  for (let i = 0; i < RIPPLE_COUNT; i++) {
+    // each ring is offset by an equal fraction of the period
+    const phase    = ((flowT + i * (RIPPLE_PERIOD / RIPPLE_COUNT)) % RIPPLE_PERIOD) / RIPPLE_PERIOD;
+    const ringR    = phase * maxR;
+    // fade in from 0→0.2 of travel, fade out from 0.2→1.0
+    const alpha    = phase < 0.2
+      ? baseA * (phase / 0.2)
+      : baseA * (1 - (phase - 0.2) / 0.8);
+    ctx.beginPath();
+    ctx.arc(gravWell.x, gravWell.y, ringR, 0, Math.PI * 2);
+    
+ctx.strokeStyle = `rgba(0, 150, 255, ${alpha})`;
+    ctx.stroke();
+  }
+
+  ctx.restore();
+}
+
 // ── Spawn: area-uniform distribution in disk, no initial overlap ──────────────
 //   Using r = maxR × sqrt(U) converts uniform U∈[0,1] to a radius whose PDF is
 //   proportional to r — giving equal probability density per unit area throughout
@@ -452,7 +504,7 @@ function spawnWetlands() {
   const list = [];
 
   for (let tries = 0; tries < 5000 && list.length < COUNT; tries++) {
-    const r      = MIN_R + Math.random() * (MAX_R - MIN_R);
+    const r      = (MIN_R + MAX_R) / 2;
     const maxRad = b.r - r - 4;                          // keep fully inside wall
     const spawnR = maxRad * Math.sqrt(Math.random());    // area-uniform radial distance
     const theta  = Math.random() * Math.PI * 2;
@@ -482,7 +534,10 @@ canvas.addEventListener('click', e => {
   }
   const b = getBoundary();
   if (Math.hypot(mx - b.cx, my - b.cy) <= b.r) {
-    flowVizOn = !flowVizOn;
+    // gravitational well — random strength each click (subtle to strong)
+    const s = (0.08 + Math.random() * 0.52) * (Math.random() < 0.5 ? 1 : -1);  // + pull, − push
+    const r = 350 + Math.pow(Math.random(), 0.45) * 200;  // biased toward larger (mean ≈ 490px)
+    gravWell = { x: mx, y: my, strength: s, radius: r };
   } else {
     trailOn = !trailOn;
     if (!trailOn) trailCtx.clearRect(0, 0, trailCanvas.width, trailCanvas.height);
@@ -541,6 +596,7 @@ function loop() {
       applyDrift(w);           // 2a Brownian micro-current
       applyWaveNoise(w);       // 2b wave noise (EMA-smoothed)
       applyCurrentFlow(w, b);  // 2c spatiotemporal current flow (curl noise)
+      applyGravWell(w);        // 2d gravitational well (click inside boundary)
       w.computeAcceleration(); // 3  a = F / m
       w.integrate();           // 4  v += a  |  5  drag  |  6  clamp  |  7  pos
       w.resolveBoundary(b);    // 8  circular wall collision
@@ -566,7 +622,8 @@ function loop() {
   }
 
   drawTrailClones();           // render stored clones
-  drawFlowViz(b);              // flow field overlay on top of clones (click inside enclosure)
+  drawFlowViz(b);              // flow field overlay on top of clones
+  drawGravWell();              // gravitational well indicator
 
   for (const w of wetlands) {
     w.draw();                  // 10 render (active circles on top)
